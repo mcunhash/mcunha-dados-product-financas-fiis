@@ -40,11 +40,26 @@ jobs:
         run: |
           curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
 
-      - name: Execute DDL via SQL Statement Execution API
+      - name: Test Databricks CLI Connection
         run: |
-          # Certifique-se de que o arquivo DDL não contém a linha '%sql'
-          SQL_CONTENT=$(cat ./ddl/schema_financas/schema_financas_000001)
+          databricks current-user me
+
+      - name: Execute DDL files via Databricks CLI
+        run: |
+          echo "Procurando arquivos DDL..."
           
-          databricks statement-execution execute \
-            --warehouse-id "2d82741f78a6da87" \
-            --statement "$SQL_CONTENT"
+          # Varre todos os arquivos dentro da pasta ddl de forma recursiva
+          find ./ddl -type f | while read -r file; do
+            echo "Processando: $file"
+            
+            # Lê o conteúdo completo do arquivo DDL
+            SQL_CONTENT=$(cat "$file")
+            
+            if [ -n "$SQL_CONTENT" ]; then
+              echo "Enviando query para o Databricks SQL Warehouse..."
+              databricks statement-execution execute \
+                --warehouse-id "2d82741f78a6da87" \
+                --statement "$SQL_CONTENT"
+              echo "--------------------------------------------------"
+            fi
+          done
