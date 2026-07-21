@@ -45,19 +45,58 @@ jobs:
         run: |
           databricks current-user me
 
-      - name: Execute DDL SQL files
+      - name: Execute DDL from Notebooks/Files
         run: |
-          echo "Procurando arquivos .sql na pasta ddl..."
+          python - << 'EOF'
+          import os
+          import subprocess
+
+          host = os.environ["DATABRICKS_HOST"].replace("https://", "")
+          token = os.environ["DATABRICKS_TOKEN"]
+          warehouse_id = "2d82741f78a6da87"
+
+          print(f"Executando na branch/ref: {os.environ.get('GITHUB_REF_NAME', 'desconhecida')}")
+          print("Procurando arquivos na pasta ddl...")
           
-          # Varre apenas arquivos com extensão .sql para evitar notebooks ipynb
-          find ./ddl -type f -name "*.sql" | while read -r file; do
-            echo "Processando o arquivo: $file"
-            
-            # Executa o arquivo SQL diretamente no Warehouse utilizando o databricks-sql-cli
-            dbsqlcli --hostname "$(echo $DATABRICKS_HOST | sed 's|https://||g')" \
-                     --http-path "/sql/1.0/warehouses/2d82741f78a6da87" \
-                     --access-token "$DATABRICKS_TOKEN" \
-                     -e "$file"
-                     
-            echo "--------------------------------------------------"
-          done
+          for root, dirs, files in os.walk("./ddl"):
+              for file in files:
+                  file_path = os.path.join(root, file)
+                  print(f"Processando: {file_path}")
+                  
+                  with open(file_path, "r", encoding="utf-8") as f:
+                      content = f.read()
+                  
+                  # Remove a linha do %sql e limpa espaços vazios mantendo o restante do código
+                  sql_lines = [
+                      line for line in content.splitlines() 
+                      if not line.strip().startswith("%sql")
+                  ]
+                  sql_clean = "\n".join(sql_lines).strip()
+                  
+                  if sql_clean:
+                      print("Enviando SQL limpo para o Warehouse...")
+                      
+                      temp_sql = "temp_exec.sql"
+                      with open(temp_sql, "w", encoding="utf-8") as tmp:
+                          tmp.write(sql_clean)
+                      
+                      cmd = [
+                          "dbsqlcli",
+                          "--hostname", host,
+                          "--http-path", f"/sql/1.0/warehouses/{warehouse_id}",
+                          "--access-token", token,
+                          "-e", temp_sql
+                      ]
+                      
+                      result = subprocess.run(cmd, capture_output=True, text=True)
+                      print(result.stdout)
+                      
+                      if result.returncode != 0:
+                          print(result.stderr)
+                          exit(result.returncode)
+                          
+                      if os.path.exists(temp_sql):
+                          os.remove(temp_sql)
+                          
+                      print("-" * 50)
+          EOF
