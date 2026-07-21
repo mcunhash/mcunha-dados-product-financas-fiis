@@ -1,4 +1,4 @@
-name: Deploy DDL (Git Folders)
+name: Deploy DDL
 
 on:
   push:
@@ -17,9 +17,7 @@ jobs:
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-      DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_CLUSTER_ID }} # ID do seu SQL Warehouse Serverless
-      # Caminho exato da sua pasta Git que aparece no seu print:
-      DATABRICKS_REPO_PATH: "/Workspace/Users/mhenrique.sousa@gmail.com/mcunha-dados-product-financas-fiis"
+      DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_CLUSTER_ID }}
 
     steps:
       - name: Checkout Repository
@@ -30,73 +28,55 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Databricks CLI
+      - name: Install Databricks SQL CLI
         run: |
-          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          pip install databricks-sql-cli
 
-      - name: Sync Databricks Git Folder & Run Notebooks
+      - name: Extract and Execute SQL from IPYNB Notebooks
         run: |
-          # Limpa o protocolo https:// do Host
+          echo "Procurando notebooks .ipynb locais de forma ordenada..."
+          
+          # Limpa o host
           CLEAN_HOST=$(echo "$DATABRICKS_HOST" | sed -e 's|^https://||' -e 's|^http://||')
-          export DATABRICKS_HOST="https://$CLEAN_HOST"
-          export DATABRICKS_TOKEN="$DATABRICKS_TOKEN"
 
-          echo "1. Sincronizando o Git Folder no Databricks (Git Pull)..."
-          # Atualiza a pasta no Databricks para garantir que ela tenha o commit mais recente da branch que disparou a pipeline
-          databricks repos update "$DATABRICKS_REPO_PATH" --branch "${{ github.ref_name }}"
-
-          echo "2. Procurando notebooks .ipynb locais de forma ordenada..."
-          # Buscamos os nomes dos arquivos localmente no runner do GitHub para saber a lista e a ordem dos deploys
+          # Varre os arquivos .ipynb locais que o GitHub acabou de baixar
           find ./ddl -type f -name "*.ipynb" | sort | while read -r file; do
             echo "=================================================="
+            echo "Processando arquivo local: $file"
             
-            # Remove o './' inicial para mapear o caminho relativo correto (ex: ddl/schema_financas/schema_financas_000001.ipynb)
-            relative_path=$(echo "$file" | sed 's|^\./||')
+            # Script em Python de 1 linha para ler o arquivo .ipynb (JSON) e extrair apenas o texto das células que começam com %sql
+            SQL_COMMANDS=$(python3 -c "
+import json
+with open('$file', 'r') as f:
+    data = json.load(f)
+sql_lines = []
+for cell in data.get('cells', []):
+    if cell.get('cell_type') == 'code':
+        source = cell.get('source', [])
+        # Junta as linhas da célula para verificar o conteúdo
+        cell_text = ''.join(source).strip()
+        if cell_text.startswith('%sql'):
+            # Remove o '%sql' e limpa as quebras de linha extras
+            sql_lines.append(cell_text.replace('%sql', '', 1).strip())
+print('\n;\n'.join(sql_lines))
+")
+
+            if [ -z "$SQL_COMMANDS" ]; then
+              echo "Aviso: Nenhuma célula %sql encontrada no notebook $file. Pulando..."
+              continue
+            fi
+
+            echo "Executando comandos extraídos no SQL Warehouse..."
             
-            # No Databricks, os notebooks no Git Folder não usam a extensão '.ipynb' no caminho de execução.
-            # Removemos a extensão .ipynb do final do caminho relativo
-            db_notebook_path="${DATABRICKS_REPO_PATH}/${relative_path%.ipynb}"
+            # Envia os comandos SQL extraídos diretamente para o seu Warehouse
+            if ! dbsqlcli --hostname "$CLEAN_HOST" \
+                          --http-path "/sql/1.0/warehouses/$DATABRICKS_WAREHOUSE_ID" \
+                          --access-token "$DATABRICKS_TOKEN" \
+                          -e "$SQL_COMMANDS"; then
+              echo "❌ ERRO: Falha ao executar o SQL do arquivo $file"
+              exit 1
+            fi
             
-            echo "Executando no Databricks: $db_notebook_path"
-            echo "Enviando para o SQL Warehouse Serverless..."
-            
-            # Executa o notebook diretamente da pasta Git sincronizada
-            run_id=$(databricks jobs submit --json "{
-              \"tasks\": [
-                {
-                  \"task_key\": \"run_ddl_notebook\",
-                  \"notebook_task\": {
-                    \"notebook_path\": \"$db_notebook_path\",
-                    \"source\": \"WORKSPACE\",
-                    \"warehouse_id\": \"$DATABRICKS_WAREHOUSE_ID\"
-                  }
-                }
-              ]
-            }" | jq -r '.run_id')
-            
-            echo "Notebook enviado! Run ID: $run_id"
-            echo "Monitorando a execução..."
-            
-            # Monitora a execução até terminar
-            while true; do
-              status_json=$(databricks runs get --run-id "$run_id")
-              life_cycle_state=$(echo "$status_json" | jq -r '.state.life_cycle_state')
-              
-              if [ "$life_cycle_state" = "TERMINATED" ]; then
-                result_state=$(echo "$status_json" | jq -r '.state.result_state')
-                if [ "$result_state" = "SUCCESS" ]; then
-                  echo "✅ Notebook executado com SUCESSO!"
-                  break
-                else
-                  echo "❌ ERRO: O notebook falhou na execução com o status: $result_state"
-                  exit 1
-                fi
-              elif [ "$life_cycle_state" = "SKIPPED" ] || [ "$life_cycle_state" = "INTERNAL_ERROR" ]; then
-                echo "❌ ERRO: Execução abortada pelo Databricks ($life_cycle_state)"
-                exit 1
-              fi
-              
-              sleep 10
-            done
+            echo "✅ Comandos SQL aplicados com SUCESSO!"
             echo "=================================================="
           done
