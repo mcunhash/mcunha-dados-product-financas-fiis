@@ -1,45 +1,63 @@
-- name: Execute DDL notebooks/files via Databricks CLI
+name: Deploy DDL
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - 'ddl/**'
+
+  push:
+    branches:
+      - dev
+      - main
+    paths:
+      - 'ddl/**'
+
+  workflow_dispatch:
+
+jobs:
+  deploy-schema:
+    runs-on: ubuntu-latest
+    
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Databricks CLI & Dependencies
         run: |
-          python - "$DATABRICKS_HOST" "$DATABRICKS_TOKEN" << 'EOF'
-          import os
-          import sys
-          import subprocess
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+          pip install databricks-sql-cli
 
-          host = sys.argv[1]
-          token = sys.argv[2]
-          warehouse_id = "2d82741f78a6da87"
+      - name: Test Databricks CLI Connection
+        run: |
+          databricks current-user me
 
-          # Varre recursivamente a pasta ddl
-          for root, dirs, files in os.walk("./ddl"):
-              for file in files:
-                  file_path = os.path.join(root, file)
-                  print(f"Processando: {file_path}")
-                  
-                  with open(file_path, "r", encoding="utf-8") as f:
-                      content = f.read()
-                  
-                  # Remove a linha do %sql (caso exista) para não gerar erro de sintaxe
-                  sql_clean = "\n".join([
-                      line for line in content.splitlines() 
-                      if not line.strip().startswith("%sql")
-                  ])
-                  
-                  if sql_clean.strip():
-                      print("Enviando query limpa para o Databricks SQL Warehouse...")
-                      
-                      # Usa o comando nativo da CLI para executar o SQL statement
-                      cmd = [
-                          "databricks", "statement-execution", "execute",
-                          "--warehouse-id", warehouse_id,
-                          "--statement", sql_clean,
-                          "--host", host,
-                          "--token", token
-                      ]
-                      
-                      result = subprocess.run(cmd, capture_output=True, text=True)
-                      print(result.stdout)
-                      if result.returncode != 0:
-                          print(result.stderr, file=sys.stderr)
-                          sys.exit(result.returncode)
-                      print("-" * 50)
-          EOF
+      - name: Execute DDL SQL files
+        run: |
+          echo "Procurando arquivos .sql na pasta ddl..."
+          
+          # Varre apenas arquivos com extensão .sql para evitar notebooks ipynb
+          find ./ddl -type f -name "*.sql" | while read -r file; do
+            echo "Processando o arquivo: $file"
+            
+            # Executa o arquivo SQL diretamente no Warehouse utilizando o databricks-sql-cli
+            dbsqlcli --hostname "$(echo $DATABRICKS_HOST | sed 's|https://||g')" \
+                     --http-path "/sql/1.0/warehouses/2d82741f78a6da87" \
+                     --access-token "$DATABRICKS_TOKEN" \
+                     -e "$file"
+                     
+            echo "--------------------------------------------------"
+          done
