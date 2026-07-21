@@ -57,7 +57,8 @@ jobs:
             
             if [ -n "$SQL_CONTENT" ]; then
               echo "Enviando query para o Databricks SQL Warehouse..."
-              databricks statement-execution execute \
+              # Correção: mudou de statement-execution execute para statement execute
+              databricks statement execute \
                 --warehouse-id "2d82741f78a6da87" \
                 --statement "$SQL_CONTENT"
               echo "--------------------------------------------------"
