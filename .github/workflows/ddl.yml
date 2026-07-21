@@ -32,37 +32,23 @@ jobs:
         run: |
           pip install databricks-sql-cli
 
-      - name: Extract and Execute SQL from IPYNB Notebooks
+      - name: Execute SQL from Notebooks
         run: |
           echo "Procurando notebooks .ipynb locais de forma ordenada..."
           
-          # Limpa o host
+          # Limpa o host para o formato correto
           CLEAN_HOST=$(echo "$DATABRICKS_HOST" | sed -e 's|^https://||' -e 's|^http://||')
 
-          # Varre os arquivos .ipynb locais que o GitHub acabou de baixar
+          # Varre os arquivos na pasta ddl de forma ordenada
           find ./ddl -type f -name "*.ipynb" | sort | while read -r file; do
             echo "=================================================="
-            echo "Processando arquivo local: $file"
+            echo "Processando o arquivo: $file"
             
-            # Script em Python de 1 linha para ler o arquivo .ipynb (JSON) e extrair apenas o texto das células que começam com %sql
-            SQL_COMMANDS=$(python3 -c "
-import json
-with open('$file', 'r') as f:
-    data = json.load(f)
-sql_lines = []
-for cell in data.get('cells', []):
-    if cell.get('cell_type') == 'code':
-        source = cell.get('source', [])
-        # Junta as linhas da célula para verificar o conteúdo
-        cell_text = ''.join(source).strip()
-        if cell_text.startswith('%sql'):
-            # Remove o '%sql' e limpa as quebras de linha extras
-            sql_lines.append(cell_text.replace('%sql', '', 1).strip())
-print('\n;\n'.join(sql_lines))
-")
-
+            # Executa o script python auxiliar para extrair o SQL
+            SQL_COMMANDS=$(python3 scripts/extract_sql.py "$file")
+            
             if [ -z "$SQL_COMMANDS" ]; then
-              echo "Aviso: Nenhuma célula %sql encontrada no notebook $file. Pulando..."
+              echo "Aviso: Nenhuma célula %sql encontrada no notebook. Pulando..."
               continue
             fi
 
