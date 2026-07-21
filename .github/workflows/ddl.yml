@@ -1,15 +1,6 @@
-name: Deploy DDL
+name: Deploy DDL (Git Folders)
 
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-    paths:
-      - 'ddl/**'
-
   push:
     branches:
       - dev
@@ -20,12 +11,15 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy-schema:
+  deploy-notebooks:
     runs-on: ubuntu-latest
-    
+   
     env:
       DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_CLUSTER_ID }} # ID do seu SQL Warehouse Serverless
+      # Caminho exato da sua pasta Git que aparece no seu print:
+      DATABRICKS_REPO_PATH: "/Workspace/Users/mhenrique.sousa@gmail.com/mcunha-dados-product-financas-fiis"
 
     steps:
       - name: Checkout Repository
@@ -36,67 +30,73 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Databricks CLI & Dependencies
+      - name: Install Databricks CLI
         run: |
           curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
-          pip install databricks-sql-cli
 
-      - name: Test Databricks CLI Connection
+      - name: Sync Databricks Git Folder & Run Notebooks
         run: |
-          databricks current-user me
+          # Limpa o protocolo https:// do Host
+          CLEAN_HOST=$(echo "$DATABRICKS_HOST" | sed -e 's|^https://||' -e 's|^http://||')
+          export DATABRICKS_HOST="https://$CLEAN_HOST"
+          export DATABRICKS_TOKEN="$DATABRICKS_TOKEN"
 
-      - name: Execute DDL from Notebooks/Files
-        run: |
-          python - << 'EOF'
-          import os
-          import subprocess
+          echo "1. Sincronizando o Git Folder no Databricks (Git Pull)..."
+          # Atualiza a pasta no Databricks para garantir que ela tenha o commit mais recente da branch que disparou a pipeline
+          databricks repos update "$DATABRICKS_REPO_PATH" --branch "${{ github.ref_name }}"
 
-          host = os.environ["DATABRICKS_HOST"].replace("https://", "")
-          token = os.environ["DATABRICKS_TOKEN"]
-          warehouse_id = "2d82741f78a6da87"
-
-          print(f"Executando na branch/ref: {os.environ.get('GITHUB_REF_NAME', 'desconhecida')}")
-          print("Procurando arquivos na pasta ddl...")
-          
-          for root, dirs, files in os.walk("./ddl"):
-              for file in files:
-                  file_path = os.path.join(root, file)
-                  print(f"Processando: {file_path}")
-                  
-                  with open(file_path, "r", encoding="utf-8") as f:
-                      content = f.read()
-                  
-                  # Remove a linha do %sql e limpa espaços vazios mantendo o restante do código
-                  sql_lines = [
-                      line for line in content.splitlines() 
-                      if not line.strip().startswith("%sql")
-                  ]
-                  sql_clean = "\n".join(sql_lines).strip()
-                  
-                  if sql_clean:
-                      print("Enviando SQL limpo para o Warehouse...")
-                      
-                      temp_sql = "temp_exec.sql"
-                      with open(temp_sql, "w", encoding="utf-8") as tmp:
-                          tmp.write(sql_clean)
-                      
-                      cmd = [
-                          "dbsqlcli",
-                          "--hostname", host,
-                          "--http-path", f"/sql/1.0/warehouses/{warehouse_id}",
-                          "--access-token", token,
-                          "-e", temp_sql
-                      ]
-                      
-                      result = subprocess.run(cmd, capture_output=True, text=True)
-                      print(result.stdout)
-                      
-                      if result.returncode != 0:
-                          print(result.stderr)
-                          exit(result.returncode)
-                          
-                      if os.path.exists(temp_sql):
-                          os.remove(temp_sql)
-                          
-                      print("-" * 50)
-          EOF
+          echo "2. Procurando notebooks .ipynb locais de forma ordenada..."
+          # Buscamos os nomes dos arquivos localmente no runner do GitHub para saber a lista e a ordem dos deploys
+          find ./ddl -type f -name "*.ipynb" | sort | while read -r file; do
+            echo "=================================================="
+            
+            # Remove o './' inicial para mapear o caminho relativo correto (ex: ddl/schema_financas/schema_financas_000001.ipynb)
+            relative_path=$(echo "$file" | sed 's|^\./||')
+            
+            # No Databricks, os notebooks no Git Folder não usam a extensão '.ipynb' no caminho de execução.
+            # Removemos a extensão .ipynb do final do caminho relativo
+            db_notebook_path="${DATABRICKS_REPO_PATH}/${relative_path%.ipynb}"
+            
+            echo "Executando no Databricks: $db_notebook_path"
+            echo "Enviando para o SQL Warehouse Serverless..."
+            
+            # Executa o notebook diretamente da pasta Git sincronizada
+            run_id=$(databricks jobs submit --json "{
+              \"tasks\": [
+                {
+                  \"task_key\": \"run_ddl_notebook\",
+                  \"notebook_task\": {
+                    \"notebook_path\": \"$db_notebook_path\",
+                    \"source\": \"WORKSPACE\",
+                    \"warehouse_id\": \"$DATABRICKS_WAREHOUSE_ID\"
+                  }
+                }
+              ]
+            }" | jq -r '.run_id')
+            
+            echo "Notebook enviado! Run ID: $run_id"
+            echo "Monitorando a execução..."
+            
+            # Monitora a execução até terminar
+            while true; do
+              status_json=$(databricks runs get --run-id "$run_id")
+              life_cycle_state=$(echo "$status_json" | jq -r '.state.life_cycle_state')
+              
+              if [ "$life_cycle_state" = "TERMINATED" ]; then
+                result_state=$(echo "$status_json" | jq -r '.state.result_state')
+                if [ "$result_state" = "SUCCESS" ]; then
+                  echo "✅ Notebook executado com SUCESSO!"
+                  break
+                else
+                  echo "❌ ERRO: O notebook falhou na execução com o status: $result_state"
+                  exit 1
+                fi
+              elif [ "$life_cycle_state" = "SKIPPED" ] || [ "$life_cycle_state" = "INTERNAL_ERROR" ]; then
+                echo "❌ ERRO: Execução abortada pelo Databricks ($life_cycle_state)"
+                exit 1
+              fi
+              
+              sleep 10
+            done
+            echo "=================================================="
+          done
