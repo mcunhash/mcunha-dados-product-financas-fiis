@@ -1,0 +1,43 @@
+name: Deploy Databricks Infrastructure
+
+on:
+  push:
+    branches:
+      - main  # Ou 'master', dependendo de qual é a sua branch principal
+  workflow_dispatch: # Permite disparar manualmente pela aba Actions do GitHub
+
+jobs:
+  deploy-schema:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Databricks CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
+
+      - name: Test Databricks CLI Connection
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          databricks currentUser me
+
+      - name: Execute DDL via SQL Statement Execution API / Databricks CLI
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          # Lê o conteúdo do arquivo SQL e executa direto no warehouse configurado
+          SQL_CONTENT=$(cat ./sql/create_schema.sql)
+          
+          databricks statement-execution execute \
+            --warehouse-id "2d82741f78a6da87" \
+            --statement "$SQL_CONTENT"
