@@ -23,7 +23,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          # Força o GitHub a baixar os arquivos da branch correta que disparou o evento
           ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
 
       - name: Set up Python
@@ -34,6 +33,10 @@ jobs:
       - name: Install Databricks SQL CLI
         run: |
           pip install databricks-sql-cli
+          
+          # Ignora a mensagem de primeiro uso criando o arquivo de configuração padrão que ele espera
+          mkdir -p ~/.dbsqlcli
+          touch ~/.dbsqlcli/dbsqlclirc
 
       - name: Execute SQL from Notebooks
         run: |
