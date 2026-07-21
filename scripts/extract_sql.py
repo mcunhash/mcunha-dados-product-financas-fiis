@@ -14,13 +14,19 @@ def extract_sql_from_notebook(filepath):
                 source = cell.get('source', [])
                 cell_text = ''.join(source).strip()
                 if cell_text.startswith('%sql'):
-                    # Remove o '%sql' e limpa os espaços e quebras de linha extras
+                    # Remove o '%sql' e remove espaços/quebras de linha nas pontas
                     clean_sql = cell_text.replace('%sql', '', 1).strip()
-                    if clean_sql:
+                    
+                    # Remove ponto e vírgula se estiver no final do comando para evitar que o parser envie statement vazio
+                    if clean_sql.endswith(';'):
+                        clean_sql = clean_sql[:-1].strip()
+                        
+                    if clean_sql: # Só adiciona se o comando não estiver vazio
                         sql_commands.append(clean_sql)
         
-        # Junta todas as células SQL encontradas separando-as por quebra de linha
-        return '\n;\n'.join(sql_commands)
+        # Junta os comandos válidos usando uma quebra de linha normal.
+        # O dbsqlcli consegue rodar múltiplos statements separados por quebra de linha.
+        return '\n'.join(sql_commands)
     except Exception as e:
         print(f"Erro ao ler o arquivo {filepath}: {e}", file=sys.stderr)
         sys.exit(1)
