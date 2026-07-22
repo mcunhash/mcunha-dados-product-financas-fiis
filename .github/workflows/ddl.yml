@@ -23,6 +23,8 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
+          # Busca todo o histórico do Git (necessário para comparar commits antigos e novos)
+          fetch-depth: 0
           ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
 
       - name: Set up Python
@@ -33,22 +35,38 @@ jobs:
       - name: Install Databricks SQL CLI
         run: |
           pip install databricks-sql-cli
-          
-          # Ignora a mensagem de primeiro uso criando o arquivo de configuração padrão que ele espera
           mkdir -p ~/.dbsqlcli
           touch ~/.dbsqlcli/dbsqlclirc
 
-      - name: Execute SQL from Notebooks
+      - name: Execute ONLY Changed Notebooks
         run: |
-          echo "Procurando notebooks .ipynb locais de forma ordenada..."
+          echo "Buscando arquivos .ipynb modificados ou adicionados neste push..."
           
-          # Limpa o host para o formato correto
+          # Limpa o host
           CLEAN_HOST=$(echo "$DATABRICKS_HOST" | sed -e 's|^https://||' -e 's|^http://||')
 
-          # Varre os arquivos na pasta ddl de forma ordenada
-          find ./ddl -type f -name "*.ipynb" | sort | while read -r file; do
+          # Se for o primeiro commit no repositório, compara com ele mesmo, senão compara com o commit anterior (HEAD~1)
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep 'ddl/.*\.ipynb$' | sort)
+          else
+            CHANGED_FILES=$(git show --name-only --format="" HEAD | grep 'ddl/.*\.ipynb$' | sort)
+          fi
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "Nenhum arquivo .ipynb alterado na pasta ddl. Finalizando."
+            exit 0
+          fi
+
+          echo "Arquivos a serem processados:"
+          echo "$CHANGED_FILES"
+          echo "=================================================="
+
+          # Executa apenas os arquivos alterados
+          echo "$CHANGED_FILES" | while read -r file; do
+            if [ -z "$file" ]; then continue; fi
+            
             echo "=================================================="
-            echo "Processando o arquivo: $file"
+            echo "Processando o arquivo alterado: $file"
             
             # Executa o script python auxiliar para extrair o SQL
             SQL_COMMANDS=$(python3 scripts/extract_sql.py "$file")
