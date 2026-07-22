@@ -1,0 +1,92 @@
+name: Deploy Scripts
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+    paths:
+      - 'dml/**'          # Monitora apenas mudanças na pasta dml/
+
+  workflow_dispatch:      # Permite rodar manualmente para forçar a carga de dados se necessário
+
+jobs:
+  deploy-scripts:
+    runs-on: ubuntu-latest
+   
+    env:
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_CLUSTER_ID }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # Busca todo o histórico do Git (necessário para o git diff funcionar)
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Databricks SQL CLI
+        run: |
+          pip install databricks-sql-cli
+          mkdir -p ~/.dbsqlcli
+          touch ~/.dbsqlcli/dbsqlclirc
+
+      - name: Execute ONLY Changed DML Notebooks
+        run: |
+          echo "Buscando arquivos .ipynb modificados ou adicionados na pasta dml..."
+          
+          # Limpa o host
+          CLEAN_HOST=$(echo "$DATABRICKS_HOST" | sed -e 's|^https://||' -e 's|^http://||')
+
+          # Se for o primeiro commit no repositório, compara com ele mesmo, senão compara com o commit anterior (HEAD~1)
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep 'dml/.*\.ipynb$' | sort)
+          else
+            CHANGED_FILES=$(git show --name-only --format="" HEAD | grep 'dml/.*\.ipynb$' | sort)
+          fi
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "Nenhum arquivo .ipynb alterado na pasta dml. Finalizando."
+            exit 0
+          fi
+
+          echo "Arquivos a serem processados nesta execução:"
+          echo "$CHANGED_FILES"
+          echo "=================================================="
+
+          # Executa apenas os arquivos alterados da pasta dml
+          echo "$CHANGED_FILES" | while read -r file; do
+            if [ -z "$file" ]; then continue; fi
+            
+            echo "=================================================="
+            echo "Processando o script de carga alterado: $file"
+            
+            # Reutiliza o mesmo script python auxiliar (extract_sql.py) para extrair o SQL do notebook de carga
+            SQL_COMMANDS=$(python3 scripts/extract_sql.py "$file")
+            
+            if [ -z "$SQL_COMMANDS" ]; then
+              echo "Aviso: Nenhuma célula %sql encontrada no notebook de carga. Pulando..."
+              continue
+            fi
+
+            echo "Executando carga de dados no SQL Warehouse Serverless..."
+            
+            # Envia os inserts/updates extraídos diretamente para o seu Warehouse
+            if ! dbsqlcli --hostname "$CLEAN_HOST" \
+                          --http-path "/sql/1.0/warehouses/$DATABRICKS_WAREHOUSE_ID" \
+                          --access-token "$DATABRICKS_TOKEN" \
+                          -e "$SQL_COMMANDS"; then
+              echo "❌ ERRO: Falha ao rodar carga do arquivo $file"
+              exit 1
+            fi
+            
+            echo "✅ Carga executada com SUCESSO!"
+            echo "=================================================="
+          done
